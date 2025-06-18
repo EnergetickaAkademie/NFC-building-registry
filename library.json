@@ -1,0 +1,32 @@
+{
+  "name": "NFC-building-registry",
+  "version": "1.0.0",
+  "description": "A library for managing NFC building cards registry with support for multiple building types",
+  "keywords": "nfc, rfid, mfrc522, building, registry, esp8266, esp32",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EnergetickaAkademie/NFC-building-registry.git"
+  },
+  "authors": [
+    {
+      "name": "Energeticka Akademie",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/EnergetickaAkademie/NFC-building-registry",
+  "dependencies": {
+    "miguelbalboa/MFRC522": "^1.4.10"
+  },
+  "frameworks": ["arduino"],
+  "platforms": ["espressif8266", "espressif32"],
+  "export": {
+    "include": [
+      "src/*",
+      "examples/*",
+      "README.md",
+      "library.json",
+      "library.properties"
+    ]
+  }
+}
