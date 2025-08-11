@@ -30,12 +30,11 @@ bool NFCBuildingRegistry::scanForCards() {
   String uid = getCardUID();
   
   // Try to read building type from NDEF data
-  byte ndefData[512];
-  int ndefLength = 0;
+  std::vector<uint8_t> ndefData;
   uint8_t buildingType = 0;
   
-  if (readNDEFData(ndefData, ndefLength)) {
-    buildingType = parseNDEFBuildingType(ndefData, ndefLength);
+  if (readNDEFData(ndefData)) {
+    buildingType = parseNDEFBuildingType(ndefData);
   } else {
     // If NDEF reading fails, try to use the first byte of UID as building type
     // This is a fallback method - you might want to implement a different strategy
@@ -223,7 +222,7 @@ String NFCBuildingRegistry::getCardUID() {
   return uidToString(mfrc522->uid.uidByte, mfrc522->uid.size);
 }
 
-bool NFCBuildingRegistry::readNDEFData(byte* ndefData, int& ndefLength) {
+bool NFCBuildingRegistry::readNDEFData(std::vector<uint8_t>& ndefData) {
   if (!mfrc522) {
     return false;
   }
@@ -234,12 +233,13 @@ bool NFCBuildingRegistry::readNDEFData(byte* ndefData, int& ndefLength) {
     return false; // Not an NFC Forum Type 2 tag
   }
   
-  byte buffer[18];
-  byte size = sizeof(buffer);
+  // Working buffer for MFRC522::MIFARE_Read (16 bytes of data + 2 CRC bytes)
+  std::vector<byte> buffer(18);
+  byte size = static_cast<byte>(buffer.size());
   MFRC522::StatusCode status;
   
   // Read capability container (CC) at page 3
-  status = mfrc522->MIFARE_Read(3, buffer, &size);
+  status = mfrc522->MIFARE_Read(3, buffer.data(), &size);
   if (status != MFRC522::STATUS_OK) {
     return false;
   }
@@ -250,33 +250,35 @@ bool NFCBuildingRegistry::readNDEFData(byte* ndefData, int& ndefLength) {
   }
   
   // Read NDEF data starting from page 4
-  ndefLength = 0;
+  ndefData.clear();
+  ndefData.reserve(64); // common small NDEF sizes; auto-expands if needed
   
   // Read multiple pages to get the full NDEF message
-  for (int page = 4; page < 20 && ndefLength < 512 - 16; page += 4) {
-    status = mfrc522->MIFARE_Read(page, buffer, &size);
+  for (int page = 4; page < 20; page += 4) {
+    size = static_cast<byte>(buffer.size());
+    status = mfrc522->MIFARE_Read(page, buffer.data(), &size);
     if (status != MFRC522::STATUS_OK) {
       break;
     }
     
-    // Copy data to NDEF buffer
-    for (int i = 0; i < 16 && (ndefLength + i) < 512; i++) {
-      ndefData[ndefLength + i] = buffer[i];
+    // Copy 16 bytes of data to NDEF buffer (skip last 2 CRC bytes)
+    for (int i = 0; i < 16; i++) {
+      ndefData.push_back(buffer[i]);
     }
-    ndefLength += 16;
     
     // If we encounter terminator TLV (0xFE), stop reading
     for (int i = 0; i < 16; i++) {
       if (buffer[i] == 0xFE) {
-        return true;
+        return !ndefData.empty();
       }
     }
   }
   
-  return ndefLength > 0;
+  return !ndefData.empty();
 }
 
-uint8_t NFCBuildingRegistry::parseNDEFBuildingType(byte* data, int length) {
+uint8_t NFCBuildingRegistry::parseNDEFBuildingType(const std::vector<uint8_t>& data) {
+  const int length = static_cast<int>(data.size());
   if (length < 3) {
     return 0;
   }

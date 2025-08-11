@@ -8,9 +8,11 @@
 #if defined(ESP8266)
   #include <map>
   #include <functional>
+  #include <vector>
 #elif defined(ESP32)
   #include <map>
   #include <functional>
+  #include <vector>
 #else
   #error "This library only supports ESP8266 and ESP32"
 #endif
@@ -39,8 +41,10 @@ private:
   BuildingEventCallback onDeleteBuildingCallback;
   
   // NDEF parsing methods
-  bool readNDEFData(byte* ndefData, int& ndefLength);
-  uint8_t parseNDEFBuildingType(byte* data, int length);
+  // Reads NDEF data into a dynamically sized buffer (heap). Returns true if any data was read.
+  bool readNDEFData(std::vector<uint8_t>& ndefData);
+  // Parses building type from NDEF data buffer. Returns 0 if not found.
+  uint8_t parseNDEFBuildingType(const std::vector<uint8_t>& data);
   String getCardUID();
   
 public:
