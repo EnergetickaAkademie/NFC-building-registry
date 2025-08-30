@@ -35,6 +35,16 @@ bool NFCBuildingRegistry::scanForCards() {
   
   if (readNDEFData(ndefData)) {
     buildingType = parseNDEFBuildingType(ndefData);
+    if (buildingType == 0) {
+      // Distinguish between true type 0 and parse failure by checking for 'B' marker manually
+      bool hasMarkerB = false;
+      for (size_t i = 0; i + 4 < ndefData.size(); ++i) {
+        if (ndefData[i] == 'B') { hasMarkerB = true; break; }
+      }
+      if (!hasMarkerB) {
+        Serial.println("NDEF parsed but no building record found; defaulting to 0.");
+      }
+    }
   } else {
     // If NDEF reading fails, try to use the first byte of UID as building type
     // This is a fallback method - you might want to implement a different strategy
@@ -282,58 +292,106 @@ uint8_t NFCBuildingRegistry::parseNDEFBuildingType(const std::vector<uint8_t>& d
   if (length < 3) {
     return 0;
   }
-  
+
   int pos = 0;
-  
+
   // Look for NDEF TLV (Type-Length-Value)
   while (pos < length - 1) {
     if (data[pos] == 0x03) {  // NDEF Message TLV
       pos++;  // Move past the type byte
-      
-      // Get length
+
+      // Get length (only supports short length < 0xFF for simplicity)
       int ndefLength = data[pos];
       pos++;
-      
-      if (pos + ndefLength > length) {
+
+      if (ndefLength <= 0 || pos + ndefLength > length) {
         return 0;
       }
-      
+
       // Parse NDEF records - look for custom building type record
       int recordPos = 0;
       while (recordPos < ndefLength) {
+        if (pos + recordPos >= length) break;
+
         byte flags = data[pos + recordPos];
         recordPos++;
-        
-        if ((flags & 0x10)) {  // SR (short record)
-          byte typeLength = data[pos + recordPos];
+
+        bool isShort = (flags & 0x10) != 0;  // SR bit
+        byte typeLength = 0;
+        uint32_t payloadLength = 0;
+
+        // Type Length
+        if (pos + recordPos >= length) break;
+        typeLength = data[pos + recordPos];
+        recordPos++;
+
+        // Payload Length
+        if (isShort) {
+          if (pos + recordPos >= length) break;
+          payloadLength = data[pos + recordPos];
           recordPos++;
-          
-          byte payloadLength = data[pos + recordPos];
-          recordPos++;
-          
-          // Read type
-          String recordType = "";
-          for (int i = 0; i < typeLength; i++) {
-            recordType += (char)data[pos + recordPos + i];
-          }
-          recordPos += typeLength;
-          
-          // If it's a building type record, get the type
-          if (recordType == "B" && payloadLength >= 1) {
-            return data[pos + recordPos]; // First byte of payload is building type
-          }
-          
-          recordPos += payloadLength;
         } else {
-          break; // Unsupported record format
+          // 4-byte length (shouldn't happen for our use case)
+          if (recordPos + 4 > ndefLength) break;
+          payloadLength = (uint32_t)data[pos + recordPos] << 24 |
+                          (uint32_t)data[pos + recordPos + 1] << 16 |
+                          (uint32_t)data[pos + recordPos + 2] << 8  |
+                          (uint32_t)data[pos + recordPos + 3];
+          recordPos += 4;
         }
+
+        // ID Length if IL flag set
+        uint8_t idLength = 0;
+        if (flags & 0x08) { // IL flag
+          if (pos + recordPos >= length) break;
+          idLength = data[pos + recordPos];
+          recordPos++;
+        }
+
+        // Type field
+        if (recordPos + typeLength > ndefLength) break;
+        String recordType = "";
+        for (int i = 0; i < typeLength; i++) {
+          recordType += (char)data[pos + recordPos + i];
+        }
+        recordPos += typeLength;
+
+        // Skip ID field if present
+        if (idLength) {
+          if (recordPos + idLength > ndefLength) break;
+          recordPos += idLength;
+        }
+
+        // Payload - check if this is our building record
+        if (recordPos + (int)payloadLength > ndefLength) break;
+        if (recordType == "B" && payloadLength >= 1) {
+          return data[pos + recordPos];
+        }
+        recordPos += payloadLength;
+
+        // If ME (Message End) bit set, stop parsing further records
+        if (flags & 0x40) break;
       }
-      
+
       return 0;
     }
     pos++;
   }
-  
+
+  // Fallback heuristic: scan raw bytes for a short record with type 'B'
+  // This handles cases where TLV parsing fails but the data is still there
+  for (int i = 0; i < length - 5; i++) {
+    byte flags = data[i];
+    if ((flags & 0x10) == 0) continue; // need SR bit
+    byte typeLen = data[i + 1];
+    if (typeLen != 1) continue;
+    byte payloadLen = data[i + 2];
+    if (payloadLen < 1) continue;
+    if (data[i + 3] == 'B') { // type byte
+      return data[i + 4]; // payload byte
+    }
+  }
+
   return 0; // No building type found
 }
 
