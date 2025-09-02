@@ -59,10 +59,12 @@ bool NFCBuildingRegistry::scanForCards() {
   // Process the card based on current mode
   if (deleteMode) {
     // Delete mode: remove building if present
-    if (hasBuilding(uid)) {
-      // Get building type before removal
-      uint8_t removedBuildingType = buildingDatabase.find(uid)->second.buildingType;      
-      // Remove the building first
+      if (hasBuilding(uid)) {
+      uint8_t removedBuildingType = 0;
+      {
+        std::lock_guard<std::mutex> lock(dbMutex);
+        removedBuildingType = buildingDatabase.find(uid)->second.buildingType; 
+      }
       bool removed = removeBuilding(uid);
       
       if (removed) {
@@ -88,7 +90,11 @@ bool NFCBuildingRegistry::scanForCards() {
       return true;
     } else {
       // Update last seen timestamp
-      buildingDatabase.find(uid)->second.lastSeen = millis();
+      {
+        std::lock_guard<std::mutex> lock(dbMutex);
+        auto it = buildingDatabase.find(uid);
+        if (it != buildingDatabase.end()) it->second.lastSeen = millis();
+      }
       Serial.println("Building already registered: UID=" + uid);
     }
   }
@@ -106,31 +112,42 @@ bool NFCBuildingRegistry::isDeleteMode() const {
 }
 
 void NFCBuildingRegistry::clearDatabase() {
+  std::lock_guard<std::mutex> lock(dbMutex);
   buildingDatabase.clear();
   Serial.println("Building database cleared");
 }
 
 size_t NFCBuildingRegistry::getDatabaseSize() const {
+  std::lock_guard<std::mutex> lock(dbMutex);
   return buildingDatabase.size();
 }
 
 std::map<String, BuildingCard> NFCBuildingRegistry::getAllBuildings() const {
-  return buildingDatabase;
+  std::lock_guard<std::mutex> lock(dbMutex);
+  return buildingDatabase; // copy
+}
+
+std::vector<BuildingCard> NFCBuildingRegistry::snapshotBuildings() const {
+  std::vector<BuildingCard> out;
+  std::lock_guard<std::mutex> lock(dbMutex);
+  out.reserve(buildingDatabase.size());
+  for (const auto &p : buildingDatabase) out.push_back(p.second);
+  return out;
 }
 
 std::map<String, BuildingCard*> NFCBuildingRegistry::getBuildingsByType(uint8_t buildingType) {
   std::map<String, BuildingCard*> result;
-  
+  std::lock_guard<std::mutex> lock(dbMutex);
   for (auto& pair : buildingDatabase) {
     if (pair.second.buildingType == buildingType) {
       result[pair.first] = &pair.second;
     }
   }
-  
   return result;
 }
 
 bool NFCBuildingRegistry::hasBuildingType(uint8_t buildingType) const {
+  std::lock_guard<std::mutex> lock(dbMutex);
   for (const auto& pair : buildingDatabase) {
     if (pair.second.buildingType == buildingType) {
       return true;
@@ -141,6 +158,7 @@ bool NFCBuildingRegistry::hasBuildingType(uint8_t buildingType) const {
 
 size_t NFCBuildingRegistry::getBuildingCount(uint8_t buildingType) const {
   size_t count = 0;
+  std::lock_guard<std::mutex> lock(dbMutex);
   for (const auto& pair : buildingDatabase) {
     if (pair.second.buildingType == buildingType) {
       count++;
@@ -154,6 +172,7 @@ bool NFCBuildingRegistry::addBuilding(const String& uid, uint8_t buildingType) {
     return false;
   }
   
+  std::lock_guard<std::mutex> lock(dbMutex);
   if (buildingDatabase.find(uid) != buildingDatabase.end()) {
     // Building already exists, update last seen
     buildingDatabase[uid].lastSeen = millis();
@@ -168,15 +187,18 @@ bool NFCBuildingRegistry::addBuilding(const String& uid, uint8_t buildingType) {
 }
 
 bool NFCBuildingRegistry::removeBuilding(const String& uid) {
-    return buildingDatabase.erase(uid) > 0;   // returns # of nodes erased
+  std::lock_guard<std::mutex> lock(dbMutex);
+  return buildingDatabase.erase(uid) > 0;   // returns # of nodes erased
 }
 
 
 bool NFCBuildingRegistry::hasBuilding(const String& uid) const {
+  std::lock_guard<std::mutex> lock(dbMutex);
   return buildingDatabase.find(uid) != buildingDatabase.end();
 }
 
 BuildingCard* NFCBuildingRegistry::getBuilding(const String& uid) {
+  std::lock_guard<std::mutex> lock(dbMutex);
   auto it = buildingDatabase.find(uid);
   if (it != buildingDatabase.end()) {
     return &it->second;
@@ -193,6 +215,7 @@ void NFCBuildingRegistry::setOnDeleteBuildingCallback(BuildingEventCallback call
 }
 
 void NFCBuildingRegistry::printDatabase() const {
+  std::lock_guard<std::mutex> lock(dbMutex);
   Serial.println("=== Building Database ===");
   Serial.println("Total buildings: " + String(buildingDatabase.size()));
   
@@ -207,6 +230,7 @@ void NFCBuildingRegistry::printDatabase() const {
 }
 
 void NFCBuildingRegistry::printBuildingsByType(uint8_t buildingType) const {
+  std::lock_guard<std::mutex> lock(dbMutex);
   Serial.println("=== Buildings of Type " + String(buildingType) + " ===");
   
   int count = 0;

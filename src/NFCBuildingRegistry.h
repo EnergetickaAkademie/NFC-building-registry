@@ -13,6 +13,7 @@
   #include <map>
   #include <functional>
   #include <vector>
+  #include <mutex>
 #else
   #error "This library only supports ESP8266 and ESP32"
 #endif
@@ -35,7 +36,8 @@ typedef std::function<void(uint8_t buildingType, const String& uid)> BuildingEve
 class NFCBuildingRegistry {
 private:
   MFRC522* mfrc522;
-  std::map<String, BuildingCard> buildingDatabase; // UID -> BuildingCard mapping
+  std::map<String, BuildingCard> buildingDatabase; // UID -> BuildingCard mapping (protected by dbMutex)
+  mutable std::mutex dbMutex; // protects buildingDatabase
   bool deleteMode;
   BuildingEventCallback onNewBuildingCallback;
   BuildingEventCallback onDeleteBuildingCallback;
@@ -66,7 +68,8 @@ public:
   size_t getDatabaseSize() const;
   
   // Query methods
-  std::map<String, BuildingCard> getAllBuildings() const;
+  std::map<String, BuildingCard> getAllBuildings() const; // snapshot copy under lock
+  std::vector<BuildingCard> snapshotBuildings() const;    // lighter-weight snapshot
   std::map<String, BuildingCard*> getBuildingsByType(uint8_t buildingType);
   bool hasBuildingType(uint8_t buildingType) const;
   size_t getBuildingCount(uint8_t buildingType) const;
