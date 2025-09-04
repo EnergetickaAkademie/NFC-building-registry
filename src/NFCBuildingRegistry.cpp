@@ -312,111 +312,129 @@ bool NFCBuildingRegistry::readNDEFData(std::vector<uint8_t>& ndefData) {
 }
 
 uint8_t NFCBuildingRegistry::parseNDEFBuildingType(const std::vector<uint8_t>& data) {
-  const int length = static_cast<int>(data.size());
-  if (length < 3) {
-    return 0;
-  }
+  // Robust parser for a single-byte payload record with type 'B'
+  if (data.empty()) return 0;
 
-  int pos = 0;
+  auto within = [&](size_t idx) { return idx < data.size(); };
 
-  // Look for NDEF TLV (Type-Length-Value)
-  while (pos < length - 1) {
-    if (data[pos] == 0x03) {  // NDEF Message TLV
-      pos++;  // Move past the type byte
+  size_t i = 0;
+  while (i < data.size()) {
+    uint8_t tlvType = data[i];
 
-      // Get length (only supports short length < 0xFF for simplicity)
-      int ndefLength = data[pos];
-      pos++;
+    if (tlvType == 0x00) { // NULL TLV (padding)
+      i += 1;
+      continue;
+    }
+    if (tlvType == 0xFE) { // Terminator TLV – stop
+      break;
+    }
 
-      if (ndefLength <= 0 || pos + ndefLength > length) {
-        return 0;
+    if (tlvType == 0x03) { // NDEF Message TLV
+      // Read length (short or extended)
+      if (!within(i + 1)) return 0; // malformed
+      size_t lenFieldBytes = 1;
+      size_t ndefLen = data[i + 1];
+      if (ndefLen == 0xFF) { // extended length (2 bytes)
+        if (!within(i + 3)) return 0; // malformed
+        ndefLen = (static_cast<size_t>(data[i + 2]) << 8) | data[i + 3];
+        lenFieldBytes = 3;
       }
 
-      // Parse NDEF records - look for custom building type record
-      int recordPos = 0;
-      while (recordPos < ndefLength) {
-        if (pos + recordPos >= length) break;
+      size_t msgStart = i + 1 + lenFieldBytes; // first byte of first record
+      size_t msgEnd = msgStart + ndefLen;      // one past last byte of message
+      if (msgStart >= data.size()) return 0;   // malformed
+      if (msgEnd > data.size()) {              // Truncated read – clamp
+        msgEnd = data.size();
+      }
 
-        byte flags = data[pos + recordPos];
-        recordPos++;
+      size_t p = msgStart;
+      while (p < msgEnd) {
+        if (!within(p)) break;
+        uint8_t header = data[p++];
+        bool shortRecord = (header & 0x10) != 0; // SR bit
+        bool hasId       = (header & 0x08) != 0; // IL bit
+        uint8_t typeLen;
+        size_t payloadLen = 0;
 
-        bool isShort = (flags & 0x10) != 0;  // SR bit
-        byte typeLength = 0;
-        uint32_t payloadLength = 0;
+        if (!within(p)) break;
+        typeLen = data[p++];
 
-        // Type Length
-        if (pos + recordPos >= length) break;
-        typeLength = data[pos + recordPos];
-        recordPos++;
-
-        // Payload Length
-        if (isShort) {
-          if (pos + recordPos >= length) break;
-          payloadLength = data[pos + recordPos];
-          recordPos++;
+        if (shortRecord) {
+          if (!within(p)) break;
+          payloadLen = data[p++];
         } else {
-          // 4-byte length (shouldn't happen for our use case)
-          if (recordPos + 4 > ndefLength) break;
-          payloadLength = (uint32_t)data[pos + recordPos] << 24 |
-                          (uint32_t)data[pos + recordPos + 1] << 16 |
-                          (uint32_t)data[pos + recordPos + 2] << 8  |
-                          (uint32_t)data[pos + recordPos + 3];
-          recordPos += 4;
+          if (p + 4 > msgEnd) break; // not supporting large records fully
+          payloadLen = (static_cast<size_t>(data[p]) << 24) |
+                       (static_cast<size_t>(data[p + 1]) << 16) |
+                       (static_cast<size_t>(data[p + 2]) << 8)  |
+                       (static_cast<size_t>(data[p + 3]));
+          p += 4;
         }
 
-        // ID Length if IL flag set
-        uint8_t idLength = 0;
-        if (flags & 0x08) { // IL flag
-          if (pos + recordPos >= length) break;
-          idLength = data[pos + recordPos];
-          recordPos++;
+        uint8_t idLen = 0;
+        if (hasId) {
+          if (!within(p)) break;
+            idLen = data[p++];
         }
 
-        // Type field
-        if (recordPos + typeLength > ndefLength) break;
-        String recordType = "";
-        for (int i = 0; i < typeLength; i++) {
-          recordType += (char)data[pos + recordPos + i];
-        }
-        recordPos += typeLength;
+        // Bounds for type / id / payload
+        if (p + typeLen > msgEnd) break;
+        const size_t typePos = p;
+        p += typeLen;
 
-        // Skip ID field if present
-        if (idLength) {
-          if (recordPos + idLength > ndefLength) break;
-          recordPos += idLength;
+        if (p + idLen > msgEnd) break;
+        const size_t idPos = p;
+        (void)idPos; // unused, but kept for clarity
+        p += idLen;
+
+        if (p + payloadLen > msgEnd) break; // truncated
+
+        // Check for our custom record type 'B'
+        if (typeLen == 1 && data[typePos] == 'B') {
+          if (payloadLen >= 1) {
+            return data[p]; // First (and only) byte is the building type
+          } else {
+            // Empty payload for 'B' – treat as not found
+            return 0; 
+          }
         }
 
-        // Payload - check if this is our building record
-        if (recordPos + (int)payloadLength > ndefLength) break;
-        if (recordType == "B" && payloadLength >= 1) {
-          return data[pos + recordPos];
-        }
-        recordPos += payloadLength;
+        // Skip payload
+        p += payloadLen;
 
         // If ME (Message End) bit set, stop parsing further records
-        if (flags & 0x40) break;
+        if (header & 0x40) break;
       }
 
-      return 0;
+      // Finished NDEF message without finding 'B'
+      break; // Stop scanning TLVs
     }
-    pos++;
-  }
 
-  // Fallback heuristic: scan raw bytes for a short record with type 'B'
-  // This handles cases where TLV parsing fails but the data is still there
-  for (int i = 0; i < length - 5; i++) {
-    byte flags = data[i];
-    if ((flags & 0x10) == 0) continue; // need SR bit
-    byte typeLen = data[i + 1];
-    if (typeLen != 1) continue;
-    byte payloadLen = data[i + 2];
-    if (payloadLen < 1) continue;
-    if (data[i + 3] == 'B') { // type byte
-      return data[i + 4]; // payload byte
+    // Unsupported TLV – need to know its length to skip. TLVs with a length byte: 0x01,0x02,0x04.. etc.
+    // For robustness, try to read a length; if impossible, abort.
+    if (!within(i + 1)) break;
+    uint8_t tlvLen = data[i + 1];
+    if (tlvLen == 0xFF) { // extended format – need 2 more bytes
+      if (!within(i + 3)) break;
+      tlvLen = 0; // We don't actually need the true value for skipping safely here.
+      i += 4;     // type + 0xFF + two length bytes (value skipped blindly)
+    } else {
+      i += 2 + tlvLen; // type + length + value
     }
   }
 
-  return 0; // No building type found
+  // Fallback heuristic: raw short record pattern scan (flags, typeLen=1, payloadLen>=1, 'B', value)
+  for (size_t k = 0; k + 4 < data.size(); ++k) {
+    uint8_t flags = data[k];
+    if ((flags & 0x10) == 0) continue; // Need SR
+    uint8_t tLen = data[k + 1];
+    uint8_t pLen = data[k + 2];
+    if (tLen == 1 && pLen >= 1 && data[k + 3] == 'B') {
+      return data[k + 4];
+    }
+  }
+
+  return 0; // Not found
 }
 
 String NFCBuildingRegistry::uidToString(byte* uid, byte uidSize) {
